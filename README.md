@@ -10,7 +10,7 @@ Builds binaries for `darwin_arm64`, `linux_amd64`, and `linux_arm64`.
 
 ## Configuration
 
-Modify the `hosts.json` file with keys => values of hosts => ips.
+Modify the [hosts.json](https://github.com/nodesocket/godns/blob/master/hosts.json) file with keys => values of hosts => ips.
 
 The default fallback resolver is [Google Public DNS](https://developers.google.com/speed/public-dns) _(1.1.1.1)_.
 
