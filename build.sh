@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -eo pipefail; [[ $TRACE ]] && set -x
 
+mkdir -p bin
+
 for GOARCH in amd64 arm64; do
   for GOOS in linux darwin; do
     # only support darwin arm64
