@@ -12,7 +12,7 @@ Builds binaries for `darwin_arm64`, `linux_amd64`, and `linux_arm64`.
 
 Modify the [hosts.json](https://github.com/nodesocket/godns/blob/master/hosts.json) config file with keys => values of hosts => ips.
 
-The default fallback resolver [Cloudflare public DNS](https://developers.cloudflare.com/1.1.1.1/) _(1.1.1.1)_ if no matching host is found in `hosts.json`.
+The default fallback resolver is [Cloudflare public DNS](https://developers.cloudflare.com/1.1.1.1/) _(1.1.1.1)_ if no matching host is found in `hosts.json`.
 
 ## Usage
 

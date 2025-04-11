@@ -19,7 +19,7 @@ import (
 
 const (
 	hostsFilePath   = "hosts.json"
-	version         = "0.3.1"
+	version         = "0.3.2"
 	defaultResolver = "1.1.1.1"
 )
 
@@ -78,7 +78,7 @@ func decodeDNSMessage(data []byte, messageType string) string {
 	dnsMsg := new(dns.Msg)
 	err := dnsMsg.Unpack(data)
 	if err != nil {
-		return fmt.Sprintf("error decoding DNS %s: %v", messageType, err)
+		return fmt.Sprintf("Error decoding DNS %s: %v", messageType, err)
 	}
 	return dnsMsg.String()
 }
