@@ -16,7 +16,7 @@ import (
 
 const (
 	hostsFilePath   = "hosts.json"
-	version         = "0.2.1"
+	version         = "0.3.0"
 	defaultResolver = "1.1.1.1"
 )
 
@@ -100,14 +100,14 @@ func decodeDNSMessage(data []byte, messageType string) string {
 func logRequest(data []byte, addr *net.UDPAddr) {
 	dnsMsg := decodeDNSMessage(data, "request")
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	requestLog := fmt.Sprintf("%s %s#%d: %s", timestamp, addr.IP.String(), addr.Port, dnsMsg)
+	requestLog := fmt.Sprintf("[%s] (%s:%d) REQUEST:\n%s", timestamp, addr.IP.String(), addr.Port, dnsMsg)
 	logger.Print(requestLog)
 }
 
 func logResponse(response []byte, addr *net.UDPAddr) {
 	dnsMsg := decodeDNSMessage(response, "response")
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	responseLog := fmt.Sprintf("%s %s#%d: %s", timestamp, addr.IP.String(), addr.Port, dnsMsg)
+	responseLog := fmt.Sprintf("[%s] (%s:%d) RESPONSE:\n%s", timestamp, addr.IP.String(), addr.Port, dnsMsg)
 	logger.Print(responseLog)
 }
 
