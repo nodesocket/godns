@@ -2,7 +2,7 @@
 
 ## Building
 
-Builds binaries for `darwin_arm64`, `linux_amd64`, and `linux_arm64`.
+Builds binaries for `darwin_arm64`, `linux_amd64`, and `linux_arm64` platforms.
 
 ```shell
 ./build.sh
@@ -17,7 +17,7 @@ The default fallback resolver is [Cloudflare public DNS](https://developers.clou
 ## Usage
 
 ```shell
-\$ dig @127.0.0.1 app1.mydomain.com
+$ dig @127.0.0.1 app1.mydomain.com
 
 ; <<>> DiG 9.10.6 <<>> @127.0.0.1 app1.mydomain.com
 ; (1 server found)
@@ -43,7 +43,7 @@ Fallback resolver using Cloudflare public DNS:
 
 
 ```shell
-\$ dig @127.0.0.1 google.com
+$ dig @127.0.0.1 google.com
 
 ; <<>> DiG 9.10.6 <<>> @127.0.0.1 google.com
 ; (1 server found)
