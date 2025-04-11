@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
@@ -9,31 +10,33 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const (
 	hostsFilePath   = "hosts.json"
-	version         = "0.3.0"
+	version         = "0.3.1"
 	defaultResolver = "1.1.1.1"
 )
 
 var (
-	mutex   sync.Mutex
-	logger  *log.Logger
-	logChan = make(chan string, 1024)
+	mutex       sync.Mutex
+	logger      *log.Logger
+	logChan     = make(chan string, 1024)
+	bufferPool  = sync.Pool{New: func() interface{} { return make([]byte, 1024) }}
+	upstreamDNS = &dns.Client{Net: "udp", Timeout: 2 * time.Second}
 )
 
-// DnsRecord represents a DNS record with host and ip
 type DnsRecord struct {
 	Host string `json:"host"`
 	IP   string `json:"ip"`
 }
 
 func init() {
-	// Initialize the logger to write to stdout
 	logger = log.New(os.Stdout, "", 0)
 
 	go func() {
@@ -41,14 +44,10 @@ func init() {
 			logger.Print(logMsg)
 		}
 	}()
-
-	// Define and parse command-line flags
-	flag.Bool("version", false, "Print version information")
-	flag.Parse()
 }
 
 func printVersion() {
-	fmt.Println(fmt.Sprintf("godns v%s", version))
+	fmt.Printf("godns v%s\n", version)
 	os.Exit(0)
 }
 
@@ -62,68 +61,50 @@ func loadHosts() (map[string]string, error) {
 	}
 	defer file.Close()
 
+	raw := make(map[string]string)
 	decoder := json.NewDecoder(file)
-	records := make(map[string]string)
-	err = decoder.Decode(&records)
-	if err != nil {
+	if err := decoder.Decode(&raw); err != nil {
 		return nil, err
 	}
 
+	records := make(map[string]string)
+	for k, v := range raw {
+		records[strings.ToLower(strings.TrimSuffix(k, "."))] = v
+	}
 	return records, nil
 }
 
 func decodeDNSMessage(data []byte, messageType string) string {
-	var result string
-
 	dnsMsg := new(dns.Msg)
-	var err error
-	switch messageType {
-	case "request":
-		err = dnsMsg.Unpack(data)
-	case "response":
-		err = dnsMsg.Unpack(data)
-	default:
-		result = fmt.Sprintf("invalid message type: %s", messageType)
-		return result
-	}
-
+	err := dnsMsg.Unpack(data)
 	if err != nil {
-		result = fmt.Sprintf("error decoding DNS %s: %v", messageType, err)
-	} else {
-		// Convert DNS message to a human-readable string
-		result = dnsMsg.String()
+		return fmt.Sprintf("error decoding DNS %s: %v", messageType, err)
 	}
-
-	return result
+	return dnsMsg.String()
 }
 
 func logRequest(data []byte, addr *net.UDPAddr) {
-	dnsMsg := decodeDNSMessage(data, "request")
+	msg := decodeDNSMessage(data, "request")
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	requestLog := fmt.Sprintf("[%s] (%s:%d) REQUEST:\n%s", timestamp, addr.IP.String(), addr.Port, dnsMsg)
-	logger.Print(requestLog)
+	logChan <- fmt.Sprintf("[%s] (%s:%d) REQUEST:\n%s", timestamp, addr.IP.String(), addr.Port, msg)
 }
 
 func logResponse(response []byte, addr *net.UDPAddr) {
-	dnsMsg := decodeDNSMessage(response, "response")
+	msg := decodeDNSMessage(response, "response")
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	responseLog := fmt.Sprintf("[%s] (%s:%d) RESPONSE:\n%s", timestamp, addr.IP.String(), addr.Port, dnsMsg)
-	logger.Print(responseLog)
+	logChan <- fmt.Sprintf("[%s] (%s:%d) RESPONSE:\n%s", timestamp, addr.IP.String(), addr.Port, msg)
 }
 
-func handleRequest(data []byte, records map[string]string, addr *net.UDPAddr, defaultResolver string, id uint16) []byte {
+func handleRequest(data []byte, records map[string]string, addr *net.UDPAddr, id uint16) []byte {
 	logRequest(data, addr)
 
 	var dnsMsg dns.Msg
-	if err := dnsMsg.Unpack(data); err != nil {
+	if err := dnsMsg.Unpack(data); err != nil || len(dnsMsg.Question) == 0 {
 		return nil
 	}
 
-	if len(dnsMsg.Question) == 0 {
-		return nil
-	}
-
-	host := strings.TrimSuffix(dnsMsg.Question[0].Name, ".")
+	q := dnsMsg.Question[0]
+	host := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 
 	response := new(dns.Msg)
 	response.SetReply(&dnsMsg)
@@ -132,21 +113,32 @@ func handleRequest(data []byte, records map[string]string, addr *net.UDPAddr, de
 
 	ip, found := records[host]
 	if found {
-		rr := new(dns.A)
-		rr.Hdr = dns.RR_Header{Name: dnsMsg.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 1}
-		rr.A = net.ParseIP(ip).To4()
-		response.Answer = append(response.Answer, rr)
+		parsedIP := net.ParseIP(ip)
+		if parsedIP == nil {
+			logChan <- fmt.Sprintf("Invalid IP in hosts file: %s", ip)
+			response.Rcode = dns.RcodeServerFailure
+		} else {
+			rr := &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   q.Name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    1,
+				},
+				A: parsedIP.To4(),
+			}
+			response.Answer = append(response.Answer, rr)
+		}
 	} else {
-		// If the host is not found, query using defaultResolver
-		client := &dns.Client{}
-		result, _, err := client.Exchange(&dns.Msg{
+		fallbackMsg := &dns.Msg{
 			MsgHdr: dns.MsgHdr{Id: id, RecursionDesired: true},
 			Question: []dns.Question{
-				{Name: dnsMsg.Question[0].Name, Qtype: dns.TypeA, Qclass: dns.ClassINET},
+				{Name: q.Name, Qtype: dns.TypeA, Qclass: dns.ClassINET},
 			},
-		}, defaultResolver+":53")
+		}
+		result, _, err := upstreamDNS.Exchange(fallbackMsg, defaultResolver+":53")
 		if err != nil {
-			fmt.Println("error querying default resolver:", err)
+			logChan <- fmt.Sprintf("Error querying upstream resolver: %v", err)
 			response.Rcode = dns.RcodeServerFailure
 		} else {
 			response = result
@@ -155,7 +147,7 @@ func handleRequest(data []byte, records map[string]string, addr *net.UDPAddr, de
 
 	responseData, err := response.Pack()
 	if err != nil {
-		fmt.Println("error calling response.Pack():", err)
+		logChan <- fmt.Sprintf("Error packing DNS response: %v", err)
 		return nil
 	}
 
@@ -163,58 +155,84 @@ func handleRequest(data []byte, records map[string]string, addr *net.UDPAddr, de
 	return responseData
 }
 
-func worker(serverConn *net.UDPConn, data []byte, addr *net.UDPAddr, records map[string]string, defaultResolver string, id uint16) {
-	response := handleRequest(data, records, addr, defaultResolver, id)
-
-	// Send the response using the same connection
-	_, err := serverConn.WriteToUDP(response, addr)
-	if err != nil {
-		fmt.Println("error sending response:", err)
+func worker(serverConn *net.UDPConn, data []byte, addr *net.UDPAddr, records map[string]string, id uint16) {
+	response := handleRequest(data, records, addr, id)
+	if response != nil {
+		if _, err := serverConn.WriteToUDP(response, addr); err != nil {
+			logChan <- fmt.Sprintf("Error sending response: %v", err)
+		}
 	}
 }
 
 func main() {
-	// Check for version flag and print version
-	if flag.Lookup("version").Value.(flag.Getter).Get().(bool) {
+	showVersion := flag.Bool("version", false, "Print version information")
+	flag.Parse()
+	if *showVersion {
 		printVersion()
 	}
 
-	// Load hosts file
 	dnsRecords, err := loadHosts()
 	if err != nil {
-		fmt.Println("error loading hosts file:", err)
+		fmt.Println("Error loading hosts file:", err)
 		os.Exit(1)
 	}
 
-	// Create a UDP address to listen on port 53
 	serverAddr, err := net.ResolveUDPAddr("udp", ":53")
 	if err != nil {
-		fmt.Println("error resolving address:", err)
+		fmt.Println("Error resolving address:", err)
 		os.Exit(1)
 	}
 
-	// Create a UDP listener
 	serverConn, err := net.ListenUDP("udp", serverAddr)
 	if err != nil {
-		fmt.Println("error listening:", err)
+		fmt.Println("Error listening:", err)
 		os.Exit(1)
 	}
 	defer serverConn.Close()
 
 	logger.Print("godns listening on :53...")
 
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+
+	// Graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		logChan <- "Shutting down..."
+		cancel()
+		serverConn.Close()
+	}()
+
 	for {
-		// Wait for a DNS request
-		buffer := make([]byte, 1024)
-		_, clientAddr, err := serverConn.ReadFromUDP(buffer)
-		if err != nil {
-			fmt.Println("error reading data:", err)
-			continue
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		default:
+			buffer := bufferPool.Get().([]byte)
+			n, clientAddr, err := serverConn.ReadFromUDP(buffer)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logChan <- fmt.Sprintf("Error reading data: %v", err)
+				bufferPool.Put(buffer)
+				continue
+			}
+
+			data := make([]byte, n)
+			copy(data, buffer[:n])
+			bufferPool.Put(buffer)
+
+			id := binary.BigEndian.Uint16(data[:2])
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				worker(serverConn, data, clientAddr, dnsRecords, id)
+			}()
 		}
-
-		id := binary.BigEndian.Uint16(buffer[:2])
-
-		// Handle the DNS request in a separate goroutine
-		go worker(serverConn, buffer, clientAddr, dnsRecords, defaultResolver, id)
 	}
 }
